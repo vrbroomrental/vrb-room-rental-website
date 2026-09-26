@@ -8,8 +8,13 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-css=$(md5 -q styles.css | cut -c1-8)
-js=$(md5 -q main.js | cut -c1-8)
+# md5 on a Mac, md5sum elsewhere (a cloud session runs Linux). Same hex either
+# way, so the stamp never changes just because the machine did.
+hash8() {
+  if command -v md5 >/dev/null 2>&1; then md5 -q "$1"; else md5sum "$1" | cut -d' ' -f1; fi | cut -c1-8
+}
+css=$(hash8 styles.css)
+js=$(hash8 main.js)
 
 # every top-level page, so a newly added one can never ship unstamped
 for f in *.html; do
@@ -22,7 +27,20 @@ echo "stamped  css=$css  js=$js"
 # Hand-maintained dates go stale the moment anyone forgets, and a wrong
 # lastmod teaches crawlers to distrust the whole file.
 python3 - <<'SITEMAP'
-import pathlib, datetime
+import pathlib, datetime, subprocess
+
+def lastmod(path):
+    # A page being changed now carries today's date. Otherwise, the date of
+    # the commit that last changed it: a fresh clone (a cloud session) stamps
+    # every file with the moment it was cloned, which would make the whole
+    # site look new on every deploy.
+    changing = subprocess.run(["git", "diff", "--quiet", "HEAD", "--", str(path)]).returncode != 0
+    if not changing:
+        r = subprocess.run(["git", "log", "-1", "--format=%cs", "--", str(path)],
+                           capture_output=True, text=True)
+        if r.returncode == 0 and r.stdout.strip():
+            return r.stdout.strip()
+    return datetime.date.fromtimestamp(path.stat().st_mtime).isoformat()
 PAGES = [
     ("index.html",   "https://vrbroomrental.com/",        "monthly", "1.0"),
     ("gallery.html", "https://vrbroomrental.com/gallery", "monthly", "0.7"),
@@ -37,7 +55,7 @@ for f, loc, freq, pri in PAGES:
     path = pathlib.Path(f)
     if not path.exists():
         continue
-    mod = datetime.date.fromtimestamp(path.stat().st_mtime).isoformat()
+    mod = lastmod(path)
     out += ["  <url>", f"    <loc>{loc}</loc>", f"    <lastmod>{mod}</lastmod>",
             f"    <changefreq>{freq}</changefreq>", f"    <priority>{pri}</priority>", "  </url>"]
 out.append("</urlset>")
@@ -52,5 +70,9 @@ fi
 git add -A
 git -c user.email="info@vrbroomrental.com" -c user.name="VRB Room Rental" \
     commit -q -m "${1:-Update site}"
-git push -q origin main
-echo "pushed $(git rev-parse --short HEAD)"
+# The branch this is on: main on the Mac, the session's own branch in a cloud
+# session — which then goes live when it is merged into main.
+branch=$(git rev-parse --abbrev-ref HEAD)
+git push -q origin HEAD
+echo "pushed $(git rev-parse --short HEAD) to $branch"
+[ "$branch" = main ] || echo "GitHub Pages publishes main — merge $branch into main to put it live."
